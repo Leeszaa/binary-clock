@@ -1,11 +1,13 @@
+#define F_CPU 1000000UL
+
 #include <avr/io.h>
 #include <avr/interrupt.h>
 #include <util/delay.h>
 #include <avr/sleep.h>
 
 volatile uint8_t seconds = 0;
-volatile uint8_t minutes = 0;
-volatile uint8_t hours = 0;
+volatile uint8_t minutes = 20;
+volatile uint8_t hours = 5;
 volatile uint8_t brightness_stage = 0; 	   // Tracks the current brightness stage (0-3)
 volatile uint8_t pwm_hold_timer = 0;       // Tracks how long the brightness button is held
 volatile uint8_t pwm_button_held = 0;      // Flag indicating if the button is currently held
@@ -14,12 +16,12 @@ volatile uint8_t min_button_held = 0;	   // Flags min button as held
 volatile uint8_t hour_hold_timer = 0;	   // Times how long the hour button is hold
 volatile uint8_t hour_button_held = 0;	   // Flags hour button as held
 
-const uint8_t brightness_levels[] = {254, 248, 156, 0}; // Define brightness levels (in reversed order)
+const uint8_t brightness_levels[] = {255, 248, 156, 0}; // Define brightness levels (in reversed order)
 
 
 void setup_timer2() {
     // Activate asynchronous mode for Timer2 with external clock (instead of synchronus) - Keine externe Clock laut Schematic
-    // ASSR |= (1 << AS2); // Removed: No external clock in schematic for Timer2
+    ASSR |= (1 << AS2);
 
     // Set Timer2 to Normal mode (instead of CTC or PWM)
     TCCR2A = 0;                     	    // Normal mode
@@ -67,8 +69,8 @@ void setup_ports() {
     // LEDs initial ausschalten (Anoden auf Low, Kathoden über PWM aus)
     PORTD &= ~((1 << PD7) | (1 << PD0) | (1 << PD4) | (1 << PD5) | (1 << PD6)); // Stunden LEDs aus
     PORTC &= ~0x3F; // Minuten LEDs aus
-    OCR1A = 0; // PWM für Stunden LEDs aus
-    OCR1B = 0; // PWM für Minuten LEDs aus
+    //OCR1A = 0; // PWM für Stunden LEDs aus
+    //OCR1B = 0; // PWM für Minuten LEDs aus
 }
 
 
@@ -218,7 +220,7 @@ ISR(PCINT2_vect) {
 
 
 void enter_sleep() {
-    if(OCR1A == 0 && OCR1B == 0) { // Überprüfe ob LEDs aus sind (PWM duty cycle 0)
+    if(OCR1A == 255 && OCR1B == 255) { // Überprüfe ob LEDs aus sind (PWM duty cycle 0)
         set_sleep_mode(SLEEP_MODE_PWR_SAVE); // Power-Down Modus wenn LEDs aus
         sleep_enable();                      // Sleep aktivieren
         sleep_cpu();                         // CPU schlafen legen
@@ -239,11 +241,6 @@ int main() {
     setup_interrupts();   // Interrupts für Buttons konfigurieren
 
     sei();  // Globale Interrupts aktivieren
-
-    // Start mit mittlerer Helligkeit
-    brightness_stage = 2;
-    OCR1A = brightness_levels[brightness_stage];
-    OCR1B = brightness_levels[brightness_stage];
 
 
     update_display(); // Erste Anzeige updaten
