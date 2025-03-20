@@ -20,20 +20,20 @@
 #define BRIGHTNESS_BUTTON PD3 // INT1 (PD3)
 
 // --- Hold Zeiten Konstanten ---
-#define HOLD_TIME_SHORT 50 // ERHÖHT auf 50 - Adjust this value to define short press duration (in Timer2 overflows)
+#define HOLD_TIME_MS 1000 // Hold time in milliseconds (e.g., 1000ms = 1 second)
+#define CHECK_INTERVAL_MS 50 // Interval to check button hold status in Timer0 (e.g., 50ms)
+#define HOLD_COUNT_THRESHOLD (HOLD_TIME_MS / CHECK_INTERVAL_MS) // Number of Timer0 interrupts for hold
 
 volatile uint8_t seconds = 0;
 volatile uint8_t minutes = 20;
 volatile uint8_t hours = 5;
 volatile uint8_t brightness_stage = 0;
-volatile uint8_t pwm_hold_timer = 0;
+volatile uint16_t pwm_hold_counter = 0; // Counter for brightness button hold time
 volatile uint8_t pwm_button_held = 0;
+volatile uint16_t hour_hold_counter = 0; // Counter for hour button hold time
+volatile uint8_t hour_button_held = 0;
 volatile uint8_t min_hold_timer = 0;
 volatile uint8_t min_button_held = 0;
-volatile uint8_t hour_hold_timer = 0;
-volatile uint8_t hour_button_held = 0;
-volatile uint8_t hour_button_short_pressed = 0; // Flag to indicate short press of hour button
-volatile uint8_t brightness_button_short_pressed = 0; // Flag to indicate short press of brightness button
 
 
 const uint8_t brightness_levels[] = {255, 248, 156, 0}; // Define brightness levels (in reversed order)
@@ -63,6 +63,14 @@ void setup_timer1() {
 
     OCR1A = brightness_levels[brightness_stage]; // Set initial brightness for Hours LEDs
     OCR1B = brightness_levels[brightness_stage]; // Set initial brightness for Minutes LEDs
+}
+
+void setup_timer0_hold_check() {
+    // Timer0 for checking button hold status (CTC mode)
+    TCCR0A = (1 << WGM01);        // CTC Mode
+    TCCR0B = (1 << CS01) | (1 << CS00); // Prescaler 64 (for ~1ms ticks at 8MHz) - ADJUST PRESCALER IF NEEDED FOR 50ms INTERVAL
+    OCR0A = 124;                  // Compare Value for ~1ms interrupt (8MHz / 64 / 1000 = 125 -1) - ADJUST OCR0A TO GET CHECK_INTERVAL_MS
+    TIMSK0 |= (1 << OCIE0A);       // Compare Match A Interrupt aktivieren
 }
 
 
@@ -107,8 +115,7 @@ void setup_interrupts() {
 
     // --- Pin Change Interrupt für MIN_BUTTON (PD1) beibehalten und für Button Release Detection für INT0 und INT1 ---
     PCICR |= (1 << PCIE2); // Pin-Change Interrupt für PORTD aktivieren
-    PCMSK2 |= (1 << PCINT17) | (1 << PCINT18) | (1 << PCINT19) | (1 << PCINT20) | (1 << PCINT21) | (1 << PCINT22) | (1 << PCINT23); // Alle PD Pins für Release Detection
-    // PCMSK2 &= ~((1 << PCINT18) | (1 << PCINT19)); // PD2 und PD3 NICHT mehr als PCINT, da INT0/INT1 verwendet werden -  <- FALSCH! PCINT2 needed for RELEASE detection!
+    PCMSK2 |= (1 << PCINT17) | (1 << PCINT18) | (1 << PCINT19); // PD1, PD2 und PD3 für Release Detection
 }
 
 void update_display() {
@@ -134,42 +141,6 @@ ISR(TIMER2_OVF_vect) {
     // Increment seconds
     seconds++;
 
-    // --- Button Hold Handling in Timer2 Overflow ISR ---
-
-    // Handle hold timing for brightness button (PD3)
-    if (pwm_button_held) {
-        pwm_hold_timer++;
-        if (pwm_hold_timer >= HOLD_TIME_SHORT) { // ~HOLD_TIME_SHORT Timer2 Overflows = Long Press
-            pwm_hold_timer = 0; // Reset hold timer
-            // Perform brightness DOWN action (subtract/decrement brightness) on hold
-            if (brightness_stage > 0) { // Prevent underflow
-                brightness_stage--;
-            } else {
-                brightness_stage = 3; // Cycle to lowest brightness if already at 0
-            }
-            OCR1A = brightness_levels[brightness_stage];
-            OCR1B = brightness_levels[brightness_stage];
-            // brightness_button_short_pressed = 0; // Reset short press flag AFTER long press action (important!) - NO NEED TO RESET SHORT PRESS FLAG HERE
-        }
-    }
-
-    // Handle hold timing for hour button (PD2)
-    if (hour_button_held) {
-        hour_hold_timer++;
-        if (hour_hold_timer >= HOLD_TIME_SHORT) { // ~HOLD_TIME_SHORT Timer2 Overflows = Long Press
-            hour_hold_timer = 0; // Reset hold timer
-            // Perform hour DOWN action (subtract/decrement hours) on hold
-            if (hours > 0) {
-                hours--;
-            } else {
-                hours = 23; // Cycle to 23 if already at 0
-            }
-            update_display();
-            // hour_button_short_pressed = 0; // Reset short press flag after long press action - NO NEED TO RESET SHORT PRESS FLAG HERE
-        }
-    }
-
-
     if (seconds >= 60) {
         seconds = 0;
         minutes++;
@@ -183,44 +154,73 @@ ISR(TIMER2_OVF_vect) {
     }
 
     update_display(); // LED Anzeige aktualisieren
+}
 
-    // --- Short Press Actions (executed after hold actions in Timer2 OVF to avoid immediate decrement after increment) ---
-    if (brightness_button_short_pressed) {
-        brightness_stage = (brightness_stage + 1) % 4; // Cycle brightness up for short press
-        OCR1A = brightness_levels[brightness_stage];
-        OCR1B = brightness_levels[brightness_stage];
-        brightness_button_short_pressed = 0; // **RESET SHORT PRESS FLAG HERE - IMPORTANT!**
+ISR(TIMER0_COMPA_vect) {
+    // Timer0 Compare Match ISR - Check for button hold status
+
+    // Check Brightness Button Hold
+    if (pwm_button_held) {
+        pwm_hold_counter++;
+        if (pwm_hold_counter >= HOLD_COUNT_THRESHOLD) {
+            pwm_hold_counter = 0; // Reset counter
+            // Perform brightness DOWN action (subtract/decrement brightness) on hold
+            if (brightness_stage > 0) {
+                brightness_stage--;
+            } else {
+                brightness_stage = 3; // Cycle to lowest brightness if already at 0
+            }
+            OCR1A = brightness_levels[brightness_stage];
+            OCR1B = brightness_levels[brightness_stage];
+        }
     }
-    // --- Short press action for hour button ----
-     if (hour_button_short_pressed) {
-        hours++; // Increment hours for short press
+
+    // Check Hour Button Hold
+    if (hour_button_held) {
+        hour_hold_counter++;
+        if (hour_hold_counter >= HOLD_COUNT_THRESHOLD) {
+            hour_hold_counter = 0; // Reset counter
+            // Perform hour DOWN action (subtract/decrement hours) on hold
+            if (hours > 0) {
+                hours--;
+            } else {
+                hours = 23; // Cycle to 23 if already at 0
+            }
+            update_display();
+        }
+    }
+}
+
+
+ISR(INT0_vect) {
+    // ISR für INT0 (HOUR_BUTTON - PD2)
+    // Handle HOUR_BUTTON press (START HOLD DETECTION TIMER, PERFORM SHORT PRESS ACTION)
+    _delay_ms(20); // Debounce
+    if (!(PIND & (1 << HOUR_BUTTON))) { // Bestätige Button ist immer noch gedrückt
+        hour_button_held = 1; // Set hour button held flag - START HOLD TIMER IN TIMER0 ISR
+        hour_hold_counter = 0;  // Reset hour hold counter
+
+        // Short press action (add/increment hours)
+        hours++;
         if (hours >= 24) {
             hours = 0;
         }
         update_display();
-        hour_button_short_pressed = 0; // Reset short press flag after action
-    }
-}
-
-ISR(INT0_vect) {
-    // ISR für INT0 (HOUR_BUTTON - PD2)
-    // Handle HOUR_BUTTON press (SET HOLD FLAG AND SHORT PRESS FLAG)
-    _delay_ms(20); // Debounce increased to 20ms
-    if (!(PIND & (1 << HOUR_BUTTON))) { // Bestätige Button ist immer noch gedrückt
-        hour_button_held = 1; // Set hour button held flag - START HOLD TIMER IN TIMER2 ISR
-        hour_hold_timer = 0;  // Reset hour hold timer
-        hour_button_short_pressed = 1; // Set short press flag - action will be done in Timer2 OVF
     }
 }
 
 ISR(INT1_vect) {
     // ISR für INT1 (BRIGHTNESS_BUTTON - PD3)
-    // Handle BRIGHTNESS_BUTTON press (SET HOLD FLAG AND SHORT PRESS FLAG)
-    _delay_ms(20); // Debounce increased to 20ms
+    // Handle BRIGHTNESS_BUTTON press (START HOLD DETECTION TIMER, PERFORM SHORT PRESS ACTION)
+    _delay_ms(20); // Debounce
     if (!(PIND & (1 << BRIGHTNESS_BUTTON))) { // Bestätige Button ist immer noch gedrückt
-        pwm_button_held = 1; // Set brightness button held flag - START HOLD TIMER IN TIMER2 ISR
-        pwm_hold_timer = 0;  // Reset brightness hold timer
-        brightness_button_short_pressed = 1; // Set short press flag - action will be done in Timer2 OVF
+        pwm_button_held = 1; // Set brightness button held flag - START HOLD TIMER IN TIMER0 ISR
+        pwm_hold_counter = 0;  // Reset brightness hold counter
+
+        // Short press action (cycle brightness up)
+        brightness_stage = (brightness_stage + 1) % 4; // Cycle brightness up for short press
+        OCR1A = brightness_levels[brightness_stage];
+        OCR1B = brightness_levels[brightness_stage];
     }
 }
 
@@ -252,12 +252,12 @@ ISR(PCINT2_vect) {
             update_display(); // Sofort updaten
         }
         if ((PIND & (1 << BRIGHTNESS_BUTTON))) { // BRIGHTNESS_BUTTON Released
-            pwm_button_held = 0; // **RESET pwm_button_held FLAG ON RELEASE!** - STOP HOLD TIMER IN TIMER2 ISR
-            brightness_button_short_pressed = 0; // **RESET SHORT PRESS FLAG ON RELEASE for robustness!**
+            pwm_button_held = 0; // **RESET pwm_button_held FLAG ON RELEASE!** - STOP HOLD TIMER IN TIMER0 ISR
+            pwm_hold_counter = 0; // Reset hold counter for robustness
         }
         if ((PIND & (1 << HOUR_BUTTON))) { // HOUR_BUTTON Released
-            hour_button_held = 0; // **RESET hour_button_held FLAG ON RELEASE!** - STOP HOLD TIMER IN TIMER2 ISR
-            hour_button_short_pressed = 0; // **RESET SHORT PRESS FLAG ON RELEASE for robustness!**
+            hour_button_held = 0; // **RESET hour_button_held FLAG ON RELEASE!** - STOP HOLD TIMER IN TIMER0 ISR
+            hour_hold_counter = 0; // Reset hold counter for robustness
         }
     }
 }
@@ -282,6 +282,7 @@ int main() {
     setup_ports();        // LED und Button Pins konfigurieren
     setup_timer2();       // Timer2 für Zeitmessung konfigurieren
     setup_timer1();       // Timer1 für PWM auf PB1 und PB2 konfigurieren
+    setup_timer0_hold_check(); // Timer0 for hold check
     setup_interrupts();   // Interrupts für Buttons konfigurieren
 
     sei();  // Globale Interrupts aktivieren
